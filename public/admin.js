@@ -1,5 +1,5 @@
 // Maktab admini paneli (A-2 ... A-8).
-import { api, esc, toast, guard, modal, prettyDate, logout, WEEKDAYS, ABSENCE_LABELS } from './common.js';
+import { api, esc, toast, guard, modal, prettyDate, logout, tashkentTime, WEEKDAYS, ABSENCE_LABELS } from './common.js';
 
 const main = document.getElementById('main');
 const me = await api('GET', '/api/auth/me');
@@ -51,7 +51,14 @@ tabs.home = async () => {
       <div class="card"><div class="muted small">Sababsiz qoldirishlar</div><div class="stat">${absent}</div></div>
       <div class="card"><div class="muted small">O'quvchilar</div><div class="stat">${s.students}</div></div>
       <div class="card"><div class="muted small">Ota-onasi botga ulangan</div><div class="stat">${s.linked_parents}</div></div>
+      <div class="card clickable-card" data-go="suspicious"><div class="muted small">Ko'rib chiqilmagan shubhali holatlar</div>
+        <div class="stat">${s.suspicious_open}</div></div>
     </div>
+    ${s.cameras > 0 && !s.node.online ? `<br><p class="notice notice-bad">Lokal miya aloqada emas${s.node.last_seen_at ? ` (oxirgi aloqa: ${esc(tashkentTime(s.node.last_seen_at))})` : ''}.
+      Kamerali xonalarda ham davomat qo'lda olinmoqda. <button type="button" class="btn-link" data-go="rooms">Tekshirish</button></p>` : ''}
+    ${s.cameras_failing.length ? `<br><div class="notice notice-warn"><b>Ishlamayotgan kameralar:</b> ${s.cameras_failing
+      .map((c) => `${esc(c.room_name)} (${esc(c.status_error ?? '')})`)
+      .join(', ')}</div>` : ''}
     ${missed.length ? `<br><div class="card"><h2>Davomat olinmagan darslar</h2>${missed
       .map((l) => `<div>${esc(l.slot_number)}-dars · ${esc(l.class_name)} · ${esc(l.subject)} · <b>${esc(l.teacher_name)}</b></div>`)
       .join('')}</div>` : ''}`;
@@ -78,19 +85,25 @@ tabs.attendance = async () => {
       <div><label for="c">Sinf</label><select id="c"><option value="">Barcha sinflar</option>${opt(classes, Number(attClass))}</select></div>
     </div><br>
     <div class="table-wrap"><table>
-      <thead><tr><th>Dars</th><th>Sinf</th><th>Fan</th><th>O'qituvchi</th><th>Xona</th><th>Holat</th><th>Bor</th><th>Yo'qlar</th></tr></thead>
+      <thead><tr><th>Dars</th><th>Sinf</th><th>Fan</th><th>O'qituvchi</th><th>Xona</th><th>Holat</th><th>Bor</th><th>Kamera</th><th>Yo'qlar</th></tr></thead>
       <tbody>${data.lessons
         .map((l) => {
           const [cls, text] = STATUS[l.status];
           const counts = l.lesson?.teacher_count != null ? `${l.lesson.teacher_count}/${l.lesson.expected_count}` : '';
+          const cam = l.lesson?.camera_status;
+          let camera = '';
+          if (cam === 'done') camera = String(l.lesson.camera_count);
+          else if (cam === 'failed') camera = `<span class="badge badge-warn" title="${esc(l.lesson.camera_error ?? '')}">ishlamadi</span>`;
+          else if (cam) camera = '<span class="muted small">sanamoqda</span>';
+          if (l.lesson?.is_suspicious) camera += ' <span class="badge badge-bad">shubhali</span>';
           const absent = l.absences.map((a) => `${esc(a.full_name)} <span class="muted small">(${ABSENCE_LABELS[a.type].toLowerCase()})</span>`).join('<br>');
           return `<tr class="${l.lesson ? 'clickable' : ''}" data-lesson="${l.lesson?.id ?? ''}">
             <td>${esc(l.slot_number)} · ${esc(l.start_time)}</td><td>${esc(l.class_name)}${l.group_name ? ` (${esc(l.group_name)})` : ''}</td>
             <td>${esc(l.subject)}</td><td>${esc(l.lesson?.teacher_name ?? l.teacher_name)}</td>
             <td>${esc(l.lesson?.room_name ?? l.room_name)}${l.lesson?.room_change_reason ? ` <span class="badge badge-warn" title="${esc(l.lesson.room_change_reason)}">o'zgargan</span>` : ''}</td>
-            <td><span class="badge ${cls}">${text}</span></td><td>${counts}</td><td>${absent}</td></tr>`;
+            <td><span class="badge ${cls}">${text}</span></td><td>${counts}</td><td>${camera}</td><td>${absent}</td></tr>`;
         })
-        .join('') || '<tr><td colspan="8" class="muted">Bu kunda jadvalda dars yo\'q</td></tr>'}</tbody>
+        .join('') || '<tr><td colspan="9" class="muted">Bu kunda jadvalda dars yo\'q</td></tr>'}</tbody>
     </table></div>`;
   main.querySelector('#d').addEventListener('change', (e) => { attDate = e.target.value; go('attendance'); });
   main.querySelector('#c').addEventListener('change', (e) => { attClass = e.target.value; go('attendance'); });
@@ -98,6 +111,15 @@ tabs.attendance = async () => {
     if (tr.dataset.lesson) tr.addEventListener('click', guard(() => fixAttendance(Number(tr.dataset.lesson))));
   });
 };
+
+// Kamera sanog'i va video belgisi: videoni NVR'da shu vaqt oralig'ida ochish mumkin.
+function cameraLine(session) {
+  if (!session) return '<p class="small muted">Kamera: xonada kamera yo\'q, davomat qo\'lda olingan</p>';
+  if (session.status === 'failed') return `<p class="small">Kamera: <span class="badge badge-warn">ishlamadi</span> ${esc(session.error ?? '')}</p>`;
+  if (session.status !== 'done') return '<p class="small">Kamera: sanamoqda...</p>';
+  return `<p class="small">Kamera: <b>${session.camera_count}</b> ·
+    Video: xona ${esc(session.room_name)}, ${esc(session.channel)}-kanal, ${tashkentTime(session.started_at)}–${tashkentTime(session.ended_at)}</p>`;
+}
 
 // Admin tuzatishi: sababi majburiy, audit tarixiga yoziladi.
 async function fixAttendance(lessonId) {
@@ -107,8 +129,9 @@ async function fixAttendance(lessonId) {
     <h2>${esc(l.class_name)} · ${esc(l.subject)}</h2>
     <p class="muted small">${esc(l.date)}, ${esc(l.slot_number)}-dars · ${esc(l.teacher_name)} · xona ${esc(l.room_name)}
       ${l.room_change_reason ? `<br>Xona o'zgarish sababi: ${esc(l.room_change_reason)}` : ''}</p>
-    ${l.attendance ? `<p class="small">O'qituvchi belgisi: <b>${l.attendance.teacher_count}/${l.attendance.expected_count}</b> ·
-      Kamera: ${l.attendance.camera_count ?? '— (2-bosqichda)'}</p>` : '<p class="notice notice-warn small">Davomat hali belgilanmagan</p>'}
+    ${l.attendance ? `<p class="small">O'qituvchi belgisi: <b>${l.attendance.teacher_count}/${l.attendance.expected_count}</b></p>`
+      : '<p class="notice notice-warn small">Davomat hali belgilanmagan</p>'}
+    ${cameraLine(l.session)}
     <div class="stack">${l.students
       .map((s) => `<div class="row"><span class="spacer">${esc(s.full_name)}</span>
         <select data-student="${s.id}"><option value="">Bor</option>${Object.entries(ABSENCE_LABELS)
@@ -129,6 +152,63 @@ async function fixAttendance(lessonId) {
       go('attendance');
     })
   );
+}
+
+// ---------- Shubhali holatlar (A-9) ----------
+const VERDICTS = {
+  kamera_xatosi: 'Kamera xatosi',
+  oqituvchi_xatosi: 'O\'qituvchi xatosi',
+  tasdiqlandi: 'Tasdiqlandi (hammasi to\'g\'ri)',
+};
+let suspAll = false;
+
+tabs.suspicious = async () => {
+  const rows = await api('GET', `/api/admin/suspicious${suspAll ? '?all=1' : ''}`);
+  main.innerHTML = `${page('Shubhali holatlar')}
+    <p class="muted small">Kamera soni va o'qituvchi belgilagan son 2 tadan ko'p farq qilgan darslar.
+      Videoni maktab NVR'ida ko'rsatilgan xona, kanal va vaqt bo'yicha oching, keyin xulosa yozing.</p>
+    <label class="check no-print"><input type="checkbox" id="all" ${suspAll ? 'checked' : ''}> Ko'rib chiqilganlarni ham ko'rsatish</label><br>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Sana, dars</th><th>Sinf, fan</th><th>O'qituvchi</th><th>Ro'yxatda</th><th>O'qituvchi</th><th>Kamera</th><th>Video</th><th>Xulosa</th></tr></thead>
+      <tbody>${rows
+        .map((r) => `<tr class="clickable" data-att="${r.attendance_id}">
+          <td>${esc(prettyDate(r.date))}<br><span class="muted small">${r.slot_number}-dars, ${esc(r.start_time)}</span></td>
+          <td>${esc(r.class_name)}${r.group_name ? ` (${esc(r.group_name)})` : ''}<br><span class="muted small">${esc(r.subject)}</span></td>
+          <td>${esc(r.teacher_name)}</td><td>${r.expected_count}</td><td><b>${r.teacher_count}</b></td><td><b>${r.camera_count ?? '—'}</b></td>
+          <td class="small">${r.video_from ? `Xona ${esc(r.room_name)}, ${esc(r.channel)}-kanal<br>${tashkentTime(r.video_from)}–${tashkentTime(r.video_to)}` : '—'}</td>
+          <td>${r.review ? `<span class="badge badge-ok">${VERDICTS[r.review.verdict]}</span>` : '<span class="badge badge-bad">Ko\'rilmagan</span>'}</td></tr>`)
+        .join('') || `<tr><td colspan="8" class="muted">${suspAll ? 'Shubhali holatlar bo\'lmagan' : 'Ko\'rib chiqilmagan holat yo\'q'}</td></tr>`}</tbody>
+    </table></div>`;
+  main.querySelector('#all').addEventListener('change', (e) => { suspAll = e.target.checked; go('suspicious'); });
+  main.querySelectorAll('tr[data-att]').forEach((tr) =>
+    tr.addEventListener('click', () => reviewSuspicious(rows.find((r) => r.attendance_id === Number(tr.dataset.att))))
+  );
+};
+
+function reviewSuspicious(r) {
+  const m = modal(`
+    <h2>${esc(r.class_name)} · ${esc(r.subject)}</h2>
+    <p class="small">${esc(prettyDate(r.date))}, ${r.slot_number}-dars · ${esc(r.teacher_name)}</p>
+    <div class="cards">
+      <div class="card"><div class="muted small">Ro'yxatda</div><div class="stat">${r.expected_count}</div></div>
+      <div class="card"><div class="muted small">O'qituvchi</div><div class="stat">${r.teacher_count}</div></div>
+      <div class="card"><div class="muted small">Kamera</div><div class="stat">${r.camera_count ?? '—'}</div></div>
+    </div>
+    ${r.video_from ? `<p class="notice small">Videoni tekshirish: NVR'da <b>${esc(r.channel)}-kanal</b> (xona ${esc(r.room_name)}),
+      <b>${esc(r.date)} ${tashkentTime(r.video_from)}–${tashkentTime(r.video_to)}</b> oralig'ini oching.</p>` : ''}
+    ${r.review ? `<p class="small">Oldingi xulosa: <b>${VERDICTS[r.review.verdict]}</b> (${esc(r.review.admin)})${r.review.comment ? ` — ${esc(r.review.comment)}` : ''}</p>` : ''}
+    <div class="field"><label for="verdict">Xulosa</label><select id="verdict">${Object.entries(VERDICTS)
+      .map(([k, v]) => `<option value="${k}">${v}</option>`)
+      .join('')}</select></div>
+    <div class="field"><label for="comment">Izoh</label><input id="comment" placeholder="Masalan: videoda 26 o'quvchi, o'qituvchi hammani bor deb belgilagan"></div>
+    <p class="muted small">Davomatni o'zgartirish kerak bo'lsa, "Davomat" bo'limida shu darsni ochib tuzating.</p>
+    <footer><button type="button" data-close>Yopish</button><button type="button" class="btn-primary" id="save">Xulosani saqlash</button></footer>`);
+  m.el.querySelector('#save').addEventListener('click', guard(async () => {
+    await api('POST', `/api/admin/suspicious/${r.attendance_id}/review`, { verdict: val(m.el, '#verdict'), comment: val(m.el, '#comment') });
+    m.close();
+    toast('Xulosa saqlandi');
+    go('suspicious');
+  }));
 }
 
 // ---------- Dars jadvali (A-6) ----------
@@ -325,8 +405,8 @@ tabs.teachers = async () => {
       <tbody>${list
         .map((t) => `<tr><td>${esc(t.full_name)}</td><td>${esc(t.phone ?? '')}</td><td>${esc(t.login)}</td>
           <td>${t.is_active ? (t.must_change_password ? '<span class="badge badge-warn">Hali kirmagan</span>' : '<span class="badge badge-ok">Faol</span>') : '<span class="badge badge-bad">Faol emas</span>'}</td>
-          <td class="row"><button type="button" class="btn-link" data-reset="${t.id}">Parolni tiklash</button>
-            <button type="button" class="btn-link" data-active="${t.id}" data-on="${t.is_active ? 0 : 1}">${t.is_active ? 'Faolsizlantirish' : 'Faollashtirish'}</button></td></tr>`)
+          <td><div class="row"><button type="button" class="btn-link" data-reset="${t.id}">Parolni tiklash</button>
+            <button type="button" class="btn-link" data-active="${t.id}" data-on="${t.is_active ? 0 : 1}">${t.is_active ? 'Faolsizlantirish' : 'Faollashtirish'}</button></div></td></tr>`)
         .join('') || '<tr><td colspan="5" class="muted">Hali o\'qituvchi yo\'q</td></tr>'}</tbody>
     </table></div>`;
 
@@ -467,11 +547,44 @@ async function showCodes(cls) {
   main.querySelector('#back').addEventListener('click', () => go('students'));
 }
 
-// ---------- Xonalar va qo'ng'iroqlar (A-5) ----------
+// ---------- Xonalar, kameralar, lokal miya va qo'ng'iroqlar (A-5) ----------
+const CAMERA_STATUS = {
+  ok: ['badge-ok', 'ishlayapti'],
+  error: ['badge-bad', 'ishlamayapti'],
+  unknown: ['badge-info', 'tekshirilmagan'],
+};
+
 tabs.rooms = async () => {
-  const [rooms, slots] = await Promise.all([api('GET', '/api/admin/rooms'), api('GET', '/api/admin/slots')]);
+  const [rooms, slots, node] = await Promise.all([api('GET', '/api/admin/rooms'), api('GET', '/api/admin/slots'), api('GET', '/api/admin/node')]);
   const next = (shift) => Math.max(0, ...slots.filter((s) => s.shift === shift).map((s) => s.number)) + 1;
-  main.innerHTML = `${page('Xonalar va qo\'ng\'iroqlar')}
+  main.innerHTML = `${page('Xonalar va kameralar')}
+    <div class="card stack">
+      <div class="row"><h2>Lokal miya</h2><span class="spacer"></span>
+        <button type="button" id="token">${node.exists ? 'Tokenni almashtirish' : 'Token yaratish'}</button></div>
+      <p class="small">${!node.exists ? 'Hali ulanmagan. Maktabdagi mini-kompyuterni ulash uchun token yarating.'
+        : node.online ? `<span class="badge badge-ok">Aloqada</span> Versiya ${esc(node.version ?? '')}`
+        : `<span class="badge badge-bad">Aloqada emas</span> ${node.last_seen_at ? `Oxirgi aloqa: ${esc(node.last_seen_at.slice(0, 10))} ${tashkentTime(node.last_seen_at)}` : 'Hali birorta ham ulanmagan'}`}</p>
+      <p class="muted small">Lokal miya maktab kameralarida o'quvchilarni sanaydi. Video va kadrlar maktabdan chiqmaydi, serverga faqat son yuboriladi.</p>
+    </div><br>
+    <div class="card stack">
+      <h2>Xonalar va kameralar</h2>
+      <form class="inline-fields" id="add-room">
+        <div><label for="rn">Yangi xona</label><input id="rn" placeholder="101" required></div>
+        <div><button type="submit">Qo'shish</button></div>
+      </form>
+      <p class="muted small">Kamerali xonada "Darsni boshladim" bosilganda kamera 60 soniya o'quvchilarni sanaydi. Kamerasiz xonada (sport zali, hovli) davomat qo'lda olinadi.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Xona</th><th>Kamera</th><th>Holati</th><th></th></tr></thead>
+        <tbody>${rooms.map((r) => {
+          const [cls, text] = CAMERA_STATUS[r.camera_status] ?? [];
+          return `<tr><td>${esc(r.name)}</td>
+            <td>${r.camera_id ? `${esc(r.channel)}-kanal${r.subtract_teacher ? '' : ' <span class="muted small">(o\'qituvchi ko\'rinmaydi)</span>'}` : '<span class="muted">Yo\'q</span>'}</td>
+            <td>${r.camera_id ? `<span class="badge ${cls}" title="${esc(r.camera_error ?? '')}">${text}</span>${r.camera_error ? `<br><span class="muted small">${esc(r.camera_error)}</span>` : ''}` : ''}</td>
+            <td><div class="row"><button type="button" class="btn-link" data-cam="${r.id}">${r.camera_id ? 'O\'zgartirish' : 'Kamera ulash'}</button>
+              ${r.camera_id ? `<button type="button" class="btn-link btn-danger" data-uncam="${r.id}">Olib tashlash</button>` : ''}</div></td></tr>`;
+        }).join('') || '<tr><td colspan="4" class="muted">Hali kiritilmagan</td></tr>'}</tbody>
+      </table></div>
+    </div><br>
     <div class="card stack">
       <h2>Qo'ng'iroq jadvali</h2>
       <form class="inline-fields" id="add-slot">
@@ -485,20 +598,6 @@ tabs.rooms = async () => {
         <thead><tr><th>Smena</th><th>Dars</th><th>Vaqti</th><th></th></tr></thead>
         <tbody>${slots.map((s) => `<tr><td>${s.shift}</td><td>${s.number}-dars</td><td>${s.start_time}–${s.end_time}</td>
           <td><button type="button" class="btn-link" data-slot="${s.id}">Tahrirlash</button></td></tr>`).join('') || '<tr><td colspan="4" class="muted">Hali kiritilmagan</td></tr>'}</tbody>
-      </table></div>
-    </div><br>
-    <div class="card stack">
-      <h2>Xonalar</h2>
-      <form class="inline-fields" id="add-room">
-        <div><label for="rn">Xona</label><input id="rn" placeholder="101" required></div>
-        <div><label class="check"><input type="checkbox" id="rc"> Kamera bor</label></div>
-        <div><button type="submit">Qo'shish</button></div>
-      </form>
-      <p class="muted small">Kamera belgisi 2-bosqichda ishlatiladi. Hozircha davomat hamma xonada qo'lda olinadi.</p>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Xona</th><th>Kamera</th><th></th></tr></thead>
-        <tbody>${rooms.map((r) => `<tr><td>${esc(r.name)}</td><td>${r.has_camera ? 'Bor' : '<span class="muted">Yo\'q</span>'}</td>
-          <td><button type="button" class="btn-link" data-cam="${r.id}" data-on="${r.has_camera ? 0 : 1}">${r.has_camera ? 'Kamera yo\'q deb belgilash' : 'Kamera bor deb belgilash'}</button></td></tr>`).join('') || '<tr><td colspan="3" class="muted">Hali kiritilmagan</td></tr>'}</tbody>
       </table></div>
     </div>`;
 
@@ -524,16 +623,46 @@ tabs.rooms = async () => {
   );
   main.querySelector('#add-room').addEventListener('submit', guard(async (e) => {
     e.preventDefault();
-    await api('POST', '/api/admin/rooms', { name: val(main, '#rn'), has_camera: main.querySelector('#rc').checked });
+    await api('POST', '/api/admin/rooms', { name: val(main, '#rn') });
     go('rooms');
   }));
   main.querySelectorAll('[data-cam]').forEach((b) =>
+    b.addEventListener('click', () => editCamera(rooms.find((r) => r.id === Number(b.dataset.cam))))
+  );
+  main.querySelectorAll('[data-uncam]').forEach((b) =>
     b.addEventListener('click', guard(async () => {
-      await api('PUT', `/api/admin/rooms/${b.dataset.cam}`, { has_camera: b.dataset.on === '1' });
+      if (!confirm('Kamera olib tashlansinmi? Bu xonada davomat qo\'lda olinadi. Oldingi sanash tarixi saqlanib qoladi.')) return;
+      await api('DELETE', `/api/admin/rooms/${b.dataset.uncam}/camera`);
       go('rooms');
     }))
   );
+  main.querySelector('#token').addEventListener('click', guard(async () => {
+    if (node.exists && !confirm('Token almashtirilsinmi? Hozirgi lokal miya uziladi va unga yangi tokenni yozish kerak bo\'ladi.')) return;
+    const { token } = await api('POST', '/api/admin/node/token', {});
+    await go('rooms');
+    modal(`
+      <h2>Lokal miya tokeni</h2>
+      <p>Bu tokenni maktabdagi mini-kompyuterning <code>.env</code> fayliga yozing. Token faqat hozir ko'rsatiladi.</p>
+      <div class="card"><div class="secret token">NODE_TOKEN=${esc(token)}</div></div>
+      <p class="muted small">Server manzili: <code>SERVER_URL=${esc(location.origin)}</code></p>
+      <footer><button type="button" class="btn-primary" data-close>Yozib oldim</button></footer>`);
+  }));
 };
+
+function editCamera(room) {
+  const m = modal(`
+    <h2>Xona ${esc(room.name)}: kamera</h2>
+    <div class="field"><label for="ch">NVR kanal raqami</label><input id="ch" value="${esc(room.channel ?? '')}" placeholder="Masalan: 3">
+      <p class="muted small">Videoregistratorda shu xona kamerasi ulangan kanal. Login va parol bu yerga yozilmaydi, ular faqat lokal miyada saqlanadi.</p></div>
+    <label class="check"><input type="checkbox" id="st" ${room.camera_id && !room.subtract_teacher ? '' : 'checked'}> O'qituvchi kamerada ko'rinadi (sanoqdan 1 ayiriladi)</label>
+    <footer><button type="button" data-close>Bekor qilish</button><button type="button" class="btn-primary" id="save">Saqlash</button></footer>`);
+  m.el.querySelector('#save').addEventListener('click', guard(async () => {
+    await api('PUT', `/api/admin/rooms/${room.id}/camera`, { channel: val(m.el, '#ch'), subtract_teacher: m.el.querySelector('#st').checked });
+    m.close();
+    toast('Kamera saqlandi');
+    go('rooms');
+  }));
+}
 
 // ---------- O'zgarishlar tarixi (X-4) ----------
 tabs.audit = async () => {

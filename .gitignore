@@ -1,3 +1,6 @@
 node_modules/
 data/*.db*
 .env
+local-node/.env
+local-node/data/
+__pycache__/

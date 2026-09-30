@@ -27,9 +27,12 @@ tx(db, () => {
     ['Yusupova Malika', 'demo_yusupova', 'Ingliz tili'],
   ].map(([name, login, subject]) => ({ id: user.run(school, 'teacher', name, login, hash).lastInsertRowid, subject }));
 
-  const rooms = ['101', '102', '201'].map((n) =>
-    db.prepare('INSERT INTO rooms (school_id, name, has_camera) VALUES (?, ?, 1)').run(school, n).lastInsertRowid
-  );
+  // 101 va 102 xonalarda kamera bor (NVR kanallari 1 va 2), 201 da yo'q.
+  const rooms = ['101', '102', '201'].map((n, i) => {
+    const room = db.prepare('INSERT INTO rooms (school_id, name, has_camera) VALUES (?, ?, ?)').run(school, n, i < 2 ? 1 : 0).lastInsertRowid;
+    if (i < 2) db.prepare('INSERT INTO cameras (school_id, room_id, channel) VALUES (?, ?, ?)').run(school, room, String(i + 1));
+    return room;
+  });
 
   // Slotlar 07:00 dan 19:40 gacha: istalgan vaqtda sinab ko'rish uchun kun davomida darslar bor.
   const slots = [];

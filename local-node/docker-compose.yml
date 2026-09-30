@@ -1,0 +1,10 @@
+services:
+  smartnode:
+    build: .
+    image: smartdavomat-node
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    # NVR maktab ichki tarmog'ida bo'lgani uchun
+    network_mode: host

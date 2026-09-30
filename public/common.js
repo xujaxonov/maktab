@@ -21,7 +21,12 @@ export async function api(method, path, body) {
     location.href = '/';
     throw new Error(data.error);
   }
-  if (!res.ok) throw new Error(data?.error || `Xatolik (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(data?.error || `Xatolik (${res.status})`);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 
@@ -95,7 +100,14 @@ export function addDays(date, days) {
   return d.toISOString().slice(0, 10);
 }
 
-export const ABSENCE_LABELS = { sababsiz: 'Sababsiz', sababli: 'Sababli', kechikdi: 'Kechikdi', tadbirda: 'Tadbirda' };
+// ISO vaqtni Toshkent bo'yicha "SS:DD:ss" ko'rinishida.
+export function tashkentTime(iso, withSeconds = true) {
+  if (!iso) return '';
+  const t = new Date(Date.parse(iso) + 5 * 3600e3).toISOString().slice(11, withSeconds ? 19 : 16);
+  return t;
+}
+
+export const ABSENCE_LABELS ={ sababsiz: 'Sababsiz', sababli: 'Sababli', kechikdi: 'Kechikdi', tadbirda: 'Tadbirda' };
 
 export async function logout() {
   await api('POST', '/api/auth/logout', {});

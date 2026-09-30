@@ -43,6 +43,7 @@ export function teacherRoutes(db) {
     const details = saveAttendance(db, req.user, {
       lessonId: Number(req.params.id),
       absences: req.body?.absences,
+      confirmDifference: req.body?.confirm_difference === true,
       ip: req.ip,
     });
     res.json(details);

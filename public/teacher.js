@@ -12,6 +12,7 @@ let currentDate = null;
 
 // ---------- Darslar ro'yxati ----------
 async function showDay(date) {
+  clearInterval(pollTimer);
   const data = await api('GET', `/api/teacher/lessons${date ? `?date=${date}` : ''}`);
   currentDate = data.date;
   const isToday = data.date === data.today;
@@ -114,8 +115,9 @@ function showAttendance(lesson) {
     <p><button type="button" class="btn-link" id="back">‹ Darslar</button></p>
     <h2>${esc(lesson.class_name)}${lesson.group_name ? ` (${esc(lesson.group_name)})` : ''} · ${esc(lesson.subject)}</h2>
     <p class="muted small">${esc(lesson.slot_number)}-dars · Xona ${esc(lesson.room_name)} ·
-      ${lesson.mode === 'manual' ? 'Qo\'lda davomat (kamerasiz)' : 'Kamera'}</p>
-    ${saved ? `<p class="notice small">Davomat saqlangan. Dars tugaguncha o'zgartirishingiz mumkin.</p>` : ''}
+      ${lesson.mode === 'manual' ? 'Qo\'lda davomat' : 'Kamera bilan'}</p>
+    <div id="camera"></div>
+    ${saved ?`<p class="notice small">Davomat saqlangan. Dars tugaguncha o'zgartirishingiz mumkin.</p>` : ''}
     <p class="muted small">Darsda yo'q o'quvchini bosing. Qaytadan bossangiz, "bor" bo'ladi.</p>
     <div class="card" id="students"></div>
     <div class="bottom-bar"><div class="inner"><button type="button" class="btn-primary btn-big" id="save"></button></div></div>`;
@@ -161,15 +163,29 @@ function showAttendance(lesson) {
     paint();
   }
   refresh();
+  renderCamera(lesson.session, total);
+  if (lesson.session && ['pending', 'running'].includes(lesson.session.status)) pollCamera(lesson.id, total);
+
+  const send = (confirmDifference) =>
+    api('PUT', `/api/teacher/lessons/${lesson.id}/attendance`, {
+      absences: [...marks].map(([student_id, type]) => ({ student_id, type })),
+      confirm_difference: confirmDifference,
+    });
 
   save.addEventListener(
     'click',
     guard(async () => {
       save.disabled = true;
       try {
-        const res = await api('PUT', `/api/teacher/lessons/${lesson.id}/attendance`, {
-          absences: [...marks].map(([student_id, type]) => ({ student_id, type })),
-        });
+        let res;
+        try {
+          res = await send(false);
+        } catch (e) {
+          // O-6: kamera soni bilan farq 2 dan oshsa, o'qituvchi tasdiqlashi kerak.
+          if (e.data?.code !== 'confirm_difference') throw e;
+          if (!confirm(`${e.message}\n\nTasdiqlasangiz, bu dars maktab ma'muriyati tomonidan tekshiriladi.`)) return;
+          res = await send(true);
+        }
         toast(`Saqlandi: ${res.attendance.teacher_count}/${res.attendance.expected_count} darsda`);
         showDay(currentDate);
       } finally {
@@ -177,6 +193,38 @@ function showAttendance(lesson) {
       }
     })
   );
+}
+
+// ---------- Kamera natijasi (O-4) ----------
+let pollTimer = null;
+
+function renderCamera(session, total) {
+  const box = document.getElementById('camera');
+  if (!box || !session) return;
+  if (session.status === 'done') {
+    box.innerHTML = `<p class="notice"><b>Kamera: ${session.camera_count} o'quvchi.</b> Ro'yxatda: ${total}</p>`;
+  } else if (session.status === 'failed') {
+    box.innerHTML = `<p class="notice notice-warn small">Kamera sanay olmadi: ${esc(session.error ?? '')}. Davomatni odatdagidek belgilang.</p>`;
+  } else {
+    const passed = Math.max(0, Math.round((Date.now() - Date.parse(session.requested_at)) / 1000));
+    const left = Math.max(0, 60 - passed);
+    box.innerHTML = `<p class="notice small">Kamera sanamoqda... ${left > 0 ? `taxminan ${left} soniya` : 'natija kutilmoqda'}.
+      Bu orada yo'qlarni belgilashingiz mumkin.</p>`;
+  }
+}
+
+function pollCamera(lessonId, total) {
+  clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    if (!document.getElementById('camera')) return clearInterval(pollTimer);
+    try {
+      const l = await api('GET', `/api/teacher/lessons/${lessonId}`);
+      renderCamera(l.session, total);
+      if (!['pending', 'running'].includes(l.session?.status)) clearInterval(pollTimer);
+    } catch {
+      // Tarmoq xatosi: keyingi urinishda qayta so'raladi.
+    }
+  }, 3000);
 }
 
 guard(showDay)();

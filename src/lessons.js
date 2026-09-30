@@ -1,6 +1,7 @@
 // Darslar va davomatning asosiy mantig'i (TZ 5.2 va 6-bo'lim).
 import { audit, tx } from './db.js';
 import { nowTashkent, weekdayOf, toMinutes, tashkentToIso } from './time.js';
+import { requestCount, notifyJobs, sessionOf, applyDifference, expireStale, DIFF_LIMIT } from './camera.js';
 
 // Darsni boshlash oynasi (O-3): boshlanishidan 5 daqiqa oldin, boshlangandan 15 daqiqa keyingacha.
 export const START_BEFORE_MIN = 5;
@@ -14,9 +15,11 @@ const NOT_PRESENT = new Set(['sababsiz', 'sababli', 'tadbirda']);
 export const ABSENCE_TYPES = ['sababsiz', 'sababli', 'kechikdi', 'tadbirda'];
 
 export class HttpError extends Error {
-  constructor(status, message) {
+  // extra: javobga qo'shiladigan qo'shimcha maydonlar (masalan, code).
+  constructor(status, message, extra = undefined) {
     super(message);
     this.status = status;
+    this.extra = extra;
   }
 }
 
@@ -120,8 +123,8 @@ export function startLesson(db, user, { timetableId, date, roomId, reason, ip })
     roomReason = String(reason).trim().slice(0, 300);
   }
 
-  return tx(db, () => {
-    // 1-bosqichda kamera ulanmagan, shuning uchun barcha darslar qo'lda rejimda (O-8).
+  const lesson = tx(db, () => {
+    // Avval qo'lda rejimda yoziladi; xonada ishlaydigan kamera bo'lsa, rejim "camera" ga o'zgaradi.
     const result = db
       .prepare(
         `INSERT INTO lessons (timetable_id, date, school_id, teacher_id, class_id, group_id, subject,
@@ -141,18 +144,22 @@ export function startLesson(db, user, { timetableId, date, roomId, reason, ip })
         new Date().toISOString(),
         tashkentToIso(date, eff.end_time)
       );
-    const lesson = db.prepare('SELECT * FROM lessons WHERE id = ?').get(result.lastInsertRowid);
+    const created = db.prepare('SELECT * FROM lessons WHERE id = ?').get(result.lastInsertRowid);
+    const mode = requestCount(db, created);
+    if (mode !== created.mode) db.prepare('UPDATE lessons SET mode = ? WHERE id = ?').run(mode, created.id);
     audit(db, {
       userId: user.id,
       schoolId: user.school_id,
       action: 'lesson.start',
       entity: 'lesson',
-      entityId: lesson.id,
-      newValue: { room_id: finalRoom, room_change_reason: roomReason },
+      entityId: created.id,
+      newValue: { room_id: finalRoom, room_change_reason: roomReason, mode },
       ip,
     });
-    return lesson;
+    return { ...created, mode };
   });
+  if (lesson.mode === 'camera') notifyJobs(lesson.school_id);
+  return lesson;
 }
 
 export function lessonDetails(db, lessonId) {
@@ -171,6 +178,7 @@ export function lessonDetails(db, lessonId) {
     )
     .get(lessonId);
   if (!lesson) return null;
+  expireStale(db);
   const attendance = db.prepare('SELECT * FROM attendance WHERE lesson_id = ?').get(lessonId) || null;
   const absences = attendance
     ? db
@@ -180,12 +188,18 @@ export function lessonDetails(db, lessonId) {
         )
         .all(attendance.id)
     : [];
-  return { ...lesson, attendance, absences, students: roster(db, lesson.class_id, lesson.group_id) };
+  return {
+    ...lesson,
+    attendance,
+    absences,
+    session: sessionOf(db, lessonId),
+    students: roster(db, lesson.class_id, lesson.group_id),
+  };
 }
 
 // Davomatni saqlash (O-5, O-7). absences: [{ student_id, type }]. Bo'sh ro'yxat = "Hamma bor".
 // byAdmin: dars tugagandan keyin faqat admin tuzatadi va sababini yozadi (TZ 4-bo'lim).
-export function saveAttendance(db, user, { lessonId, absences, reason, ip, byAdmin = false }) {
+export function saveAttendance(db, user, { lessonId, absences, reason, ip, byAdmin = false, confirmDifference = false }) {
   const lesson = db.prepare('SELECT * FROM lessons WHERE id = ?').get(lessonId);
   if (!lesson || lesson.school_id !== user.school_id) throw new HttpError(404, 'Dars topilmadi');
   if (!byAdmin && lesson.teacher_id !== user.id) throw new HttpError(403, 'Bu dars sizniki emas');
@@ -208,6 +222,17 @@ export function saveAttendance(db, user, { lessonId, absences, reason, ip, byAdm
   const expected = students.length;
   const teacherCount = expected - [...next.values()].filter((t) => NOT_PRESENT.has(t)).length;
   const nowIso = new Date().toISOString();
+
+  // O-6: o'qituvchi soni kamera sonidan 2 tadan ko'p farq qilsa, avval tasdiq so'raladi.
+  // Tasdiqlangan holat shubhali deb belgilanadi (applyDifference).
+  const session = db.prepare("SELECT camera_count FROM counting_sessions WHERE lesson_id = ? AND status = 'done'").get(lessonId);
+  if (!byAdmin && session && Math.abs(session.camera_count - teacherCount) > DIFF_LIMIT && !confirmDifference) {
+    throw new HttpError(
+      409,
+      `Kamera ${session.camera_count} ta sanadi, siz ${teacherCount} ta belgiladingiz. Tasdiqlaysizmi?`,
+      { code: 'confirm_difference', camera_count: session.camera_count, teacher_count: teacherCount }
+    );
+  }
 
   return tx(db, () => {
     let att = db.prepare('SELECT * FROM attendance WHERE lesson_id = ?').get(lessonId);
@@ -248,6 +273,7 @@ export function saveAttendance(db, user, { lessonId, absences, reason, ip, byAdm
       ip,
     });
 
+    applyDifference(db, lessonId);
     queueNotifications(db, lesson, prev, next);
     return lessonDetails(db, lessonId);
   });

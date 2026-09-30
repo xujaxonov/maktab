@@ -189,6 +189,61 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 2-bosqich: lokal miya (maktabdagi mini-kompyuter). Token faqat xesh ko'rinishida saqlanadi.
+CREATE TABLE IF NOT EXISTS local_nodes (
+  id INTEGER PRIMARY KEY,
+  school_id INTEGER NOT NULL UNIQUE REFERENCES schools(id),
+  token_hash TEXT NOT NULL UNIQUE,
+  version TEXT,
+  last_seen_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Xonadagi kamera. Kamera paroli serverda saqlanmaydi: lokal miya kanal raqamidan
+-- o'zidagi NVR manzili orqali oqimni topadi.
+CREATE TABLE IF NOT EXISTS cameras (
+  id INTEGER PRIMARY KEY,
+  school_id INTEGER NOT NULL REFERENCES schools(id),
+  room_id INTEGER NOT NULL UNIQUE REFERENCES rooms(id),
+  channel TEXT NOT NULL,
+  subtract_teacher INTEGER NOT NULL DEFAULT 1,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'unknown' CHECK (status IN ('unknown', 'ok', 'error')),
+  status_error TEXT,
+  status_at TEXT
+);
+
+-- Sanash sessiyasi: "Darsni boshladim" dan keyingi 60 soniya (TZ L-1 ... L-4).
+-- Video belgisi = kamera + started_at + ended_at; videoning o'zi NVR'da qoladi.
+CREATE TABLE IF NOT EXISTS counting_sessions (
+  id INTEGER PRIMARY KEY,
+  lesson_id INTEGER NOT NULL UNIQUE REFERENCES lessons(id),
+  camera_id INTEGER REFERENCES cameras(id),
+  node_id INTEGER REFERENCES local_nodes(id),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'done', 'failed')),
+  requested_at TEXT NOT NULL,
+  started_at TEXT,
+  ended_at TEXT,
+  camera_count INTEGER,
+  error TEXT
+);
+
+-- Adminning shubhali holat bo'yicha xulosasi (A-9).
+CREATE TABLE IF NOT EXISTS suspicious_reviews (
+  id INTEGER PRIMARY KEY,
+  attendance_id INTEGER NOT NULL REFERENCES attendance(id),
+  admin_id INTEGER NOT NULL REFERENCES users(id),
+  verdict TEXT NOT NULL CHECK (verdict IN ('kamera_xatosi', 'oqituvchi_xatosi', 'tasdiqlandi')),
+  comment TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON counting_sessions (status);
+CREATE TRIGGER IF NOT EXISTS sessions_no_delete BEFORE DELETE ON counting_sessions
+BEGIN SELECT RAISE(ABORT, 'Sanash yozuvini o''chirib bo''lmaydi'); END;
+CREATE TRIGGER IF NOT EXISTS reviews_no_delete BEFORE DELETE ON suspicious_reviews
+BEGIN SELECT RAISE(ABORT, 'Xulosani o''chirib bo''lmaydi'); END;
+
 -- Davomat yozuvlari va o'zgarishlar tarixini hech kim o'chira olmaydi (TZ 8-bo'lim).
 CREATE TRIGGER IF NOT EXISTS attendance_no_delete BEFORE DELETE ON attendance
 BEGIN SELECT RAISE(ABORT, 'Davomat yozuvini o''chirib bo''lmaydi'); END;

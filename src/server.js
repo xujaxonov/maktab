@@ -7,6 +7,7 @@ import { sessionMiddleware } from './auth.js';
 import { authRoutes } from './routes/auth.js';
 import { adminRoutes } from './routes/admin.js';
 import { teacherRoutes } from './routes/teacher.js';
+import { nodeRoutes } from './routes/node.js';
 import { startBot } from './bot.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -40,12 +41,13 @@ export function createApp(db) {
   app.use('/api/auth', authRoutes(db));
   app.use('/api/admin', adminRoutes(db));
   app.use('/api/teacher', teacherRoutes(db));
+  app.use('/api/node', nodeRoutes(db));
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Topilmadi' }));
 
   app.use(express.static(join(root, 'public'), { extensions: ['html'] }));
 
   app.use((err, _req, res, _next) => {
-    if (err.status && err.status < 500) return res.status(err.status).json({ error: err.message });
+    if (err.status && err.status < 500) return res.status(err.status).json({ ...err.extra, error: err.message });
     console.error(err);
     res.status(500).json({ error: 'Serverda xatolik yuz berdi' });
   });

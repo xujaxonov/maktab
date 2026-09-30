@@ -5,6 +5,7 @@ import { audit, tx } from '../db.js';
 import { requireRole, hashPassword, generatePassword, destroyUserSessions } from '../auth.js';
 import { effectiveLessons, lessonDetails, saveAttendance, HttpError } from '../lessons.js';
 import { nowTashkent, isDate, isTime, toMinutes, addDays } from '../time.js';
+import { isNodeOnline, newNodeToken, hashToken } from '../camera.js';
 
 const str = (v, max = 200) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 const id = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
@@ -67,6 +68,18 @@ export function adminRoutes(db) {
       linked_parents: count(
         'SELECT COUNT(DISTINCT pl.student_id) n FROM parent_links pl JOIN students st ON st.id = pl.student_id WHERE st.school_id = ? AND pl.parent_id IS NOT NULL'
       ),
+      cameras: count('SELECT COUNT(*) n FROM cameras WHERE school_id = ? AND is_active = 1'),
+      cameras_failing: db
+        .prepare("SELECT r.name AS room_name, c.status_error FROM cameras c JOIN rooms r ON r.id = c.room_id WHERE c.school_id = ? AND c.is_active = 1 AND c.status = 'error' ORDER BY r.name")
+        .all(s),
+      suspicious_open: count(
+        `SELECT COUNT(*) n FROM attendance a JOIN lessons l ON l.id = a.lesson_id
+         WHERE l.school_id = ? AND a.is_suspicious = 1 AND NOT EXISTS (SELECT 1 FROM suspicious_reviews sr WHERE sr.attendance_id = a.id)`
+      ),
+      node: (() => {
+        const node = db.prepare('SELECT last_seen_at FROM local_nodes WHERE school_id = ?').get(s);
+        return node ? { exists: true, online: isNodeOnline(node), last_seen_at: node.last_seen_at } : { exists: false, online: false };
+      })(),
       today: nowTashkent().date,
     });
   });
@@ -287,8 +300,18 @@ export function adminRoutes(db) {
   });
 
   // ---------- Xonalar (A-5) ----------
+  // Xonalar kamerasi bilan birga. has_camera kameralar jadvalidan kelib chiqadi.
   r.get('/rooms', (req, res) => {
-    res.json(db.prepare('SELECT id, name, has_camera FROM rooms WHERE school_id = ? ORDER BY name').all(req.user.school_id));
+    res.json(
+      db
+        .prepare(
+          `SELECT r.id, r.name, r.has_camera, c.id AS camera_id, c.channel, c.subtract_teacher,
+                  c.status AS camera_status, c.status_error AS camera_error, c.status_at AS camera_status_at
+           FROM rooms r LEFT JOIN cameras c ON c.room_id = r.id AND c.is_active = 1
+           WHERE r.school_id = ? ORDER BY r.name`
+        )
+        .all(req.user.school_id)
+    );
   });
 
   r.post('/rooms', (req, res) => {
@@ -297,9 +320,7 @@ export function adminRoutes(db) {
     if (db.prepare('SELECT 1 FROM rooms WHERE school_id = ? AND name = ?').get(req.user.school_id, name)) {
       throw new HttpError(409, 'Bunday xona bor');
     }
-    const result = db
-      .prepare('INSERT INTO rooms (school_id, name, has_camera) VALUES (?, ?, ?)')
-      .run(req.user.school_id, name, req.body?.has_camera ? 1 : 0);
+    const result = db.prepare('INSERT INTO rooms (school_id, name) VALUES (?, ?)').run(req.user.school_id, name);
     log(req, 'room.create', 'room', result.lastInsertRowid, undefined, { name });
     res.status(201).json({ id: result.lastInsertRowid });
   });
@@ -307,10 +328,107 @@ export function adminRoutes(db) {
   r.put('/rooms/:id', (req, res) => {
     const room = own('rooms', Number(req.params.id), req.user.school_id);
     const name = str(req.body?.name, 40) || room.name;
-    const cam = req.body?.has_camera === undefined ? room.has_camera : req.body.has_camera ? 1 : 0;
-    db.prepare('UPDATE rooms SET name = ?, has_camera = ? WHERE id = ?').run(name, cam, room.id);
-    log(req, 'room.update', 'room', room.id, { name: room.name, has_camera: room.has_camera }, { name, has_camera: cam });
+    db.prepare('UPDATE rooms SET name = ? WHERE id = ?').run(name, room.id);
+    log(req, 'room.update', 'room', room.id, { name: room.name }, { name });
     res.json({ ok: true });
+  });
+
+  // ---------- Kameralar (A-5) ----------
+  // Xonaga kamera biriktirish: faqat NVR kanal raqami. Login va parol lokal miyada saqlanadi.
+  r.put('/rooms/:id/camera', (req, res) => {
+    const room = own('rooms', Number(req.params.id), req.user.school_id);
+    const channel = str(String(req.body?.channel ?? ''), 20);
+    if (!/^[A-Za-z0-9_-]{1,20}$/.test(channel)) throw new HttpError(400, 'Kanal raqamini kiriting, masalan 3');
+    const subtract = req.body?.subtract_teacher === false ? 0 : 1;
+    const old = db.prepare('SELECT * FROM cameras WHERE room_id = ?').get(room.id);
+    tx(db, () => {
+      if (old) {
+        db.prepare("UPDATE cameras SET channel = ?, subtract_teacher = ?, is_active = 1, status = 'unknown', status_error = NULL WHERE id = ?")
+          .run(channel, subtract, old.id);
+      } else {
+        db.prepare('INSERT INTO cameras (school_id, room_id, channel, subtract_teacher) VALUES (?, ?, ?, ?)')
+          .run(req.user.school_id, room.id, channel, subtract);
+      }
+      db.prepare('UPDATE rooms SET has_camera = 1 WHERE id = ?').run(room.id);
+      log(req, 'camera.set', 'room', room.id, old ? { channel: old.channel, is_active: old.is_active } : undefined, { channel, subtract_teacher: subtract });
+    });
+    res.json({ ok: true });
+  });
+
+  // Kamera o'chirilmaydi (sanash tarixida ishlatilgan bo'lishi mumkin), faqat faolsizlantiriladi.
+  r.delete('/rooms/:id/camera', (req, res) => {
+    const room = own('rooms', Number(req.params.id), req.user.school_id);
+    tx(db, () => {
+      db.prepare('UPDATE cameras SET is_active = 0 WHERE room_id = ?').run(room.id);
+      db.prepare('UPDATE rooms SET has_camera = 0 WHERE id = ?').run(room.id);
+      log(req, 'camera.remove', 'room', room.id);
+    });
+    res.json({ ok: true });
+  });
+
+  // ---------- Lokal miya ----------
+  r.get('/node', (req, res) => {
+    const node = db.prepare('SELECT id, version, last_seen_at, created_at FROM local_nodes WHERE school_id = ?').get(req.user.school_id);
+    res.json(node ? { exists: true, online: isNodeOnline(node), ...node } : { exists: false, online: false });
+  });
+
+  // Lokal miya uchun token yaratish yoki almashtirish. Token faqat bir marta ko'rsatiladi;
+  // almashtirilsa, eski token bilan ulangan qurilma darhol uziladi.
+  r.post('/node/token', (req, res) => {
+    const token = newNodeToken();
+    const existing = db.prepare('SELECT id FROM local_nodes WHERE school_id = ?').get(req.user.school_id);
+    if (existing) {
+      db.prepare('UPDATE local_nodes SET token_hash = ?, last_seen_at = NULL WHERE id = ?').run(hashToken(token), existing.id);
+    } else {
+      db.prepare('INSERT INTO local_nodes (school_id, token_hash) VALUES (?, ?)').run(req.user.school_id, hashToken(token));
+    }
+    log(req, existing ? 'node.token_regenerate' : 'node.create', 'local_node', existing?.id);
+    res.json({ token });
+  });
+
+  // ---------- Shubhali holatlar (A-9) ----------
+  r.get('/suspicious', (req, res) => {
+    const onlyOpen = req.query.all !== '1';
+    const rows = db
+      .prepare(
+        `SELECT a.id AS attendance_id, a.expected_count, a.teacher_count, a.camera_count, a.difference,
+                l.id AS lesson_id, l.date, l.subject, c.name AS class_name, g.name AS group_name,
+                u.full_name AS teacher_name, r.name AS room_name, s.number AS slot_number, s.start_time,
+                cs.started_at AS video_from, cs.ended_at AS video_to, cam.channel,
+                (SELECT json_object('verdict', sr.verdict, 'comment', sr.comment, 'created_at', sr.created_at, 'admin', au.full_name)
+                   FROM suspicious_reviews sr JOIN users au ON au.id = sr.admin_id
+                   WHERE sr.attendance_id = a.id ORDER BY sr.id DESC LIMIT 1) AS review
+         FROM attendance a
+         JOIN lessons l ON l.id = a.lesson_id
+         JOIN classes c ON c.id = l.class_id
+         LEFT JOIN groups g ON g.id = l.group_id
+         JOIN users u ON u.id = l.teacher_id
+         JOIN rooms r ON r.id = l.room_id
+         JOIN timetable t ON t.id = l.timetable_id
+         JOIN lesson_slots s ON s.id = t.slot_id
+         LEFT JOIN counting_sessions cs ON cs.lesson_id = l.id
+         LEFT JOIN cameras cam ON cam.id = cs.camera_id
+         WHERE l.school_id = ? AND a.is_suspicious = 1
+         ORDER BY l.date DESC, s.number DESC`
+      )
+      .all(req.user.school_id)
+      .map((row) => ({ ...row, review: row.review ? JSON.parse(row.review) : null }));
+    res.json(onlyOpen ? rows.filter((r) => !r.review) : rows);
+  });
+
+  r.post('/suspicious/:id/review', (req, res) => {
+    const att = db
+      .prepare('SELECT a.* FROM attendance a JOIN lessons l ON l.id = a.lesson_id WHERE a.id = ? AND l.school_id = ? AND a.is_suspicious = 1')
+      .get(Number(req.params.id), req.user.school_id);
+    if (!att) throw new HttpError(404, 'Shubhali holat topilmadi');
+    const verdict = req.body?.verdict;
+    if (!['kamera_xatosi', 'oqituvchi_xatosi', 'tasdiqlandi'].includes(verdict)) throw new HttpError(400, 'Xulosani tanlang');
+    const comment = str(req.body?.comment, 500) || null;
+    const result = db
+      .prepare('INSERT INTO suspicious_reviews (attendance_id, admin_id, verdict, comment) VALUES (?, ?, ?, ?)')
+      .run(att.id, req.user.id, verdict, comment);
+    log(req, 'suspicious.review', 'attendance', att.id, undefined, { verdict, comment });
+    res.status(201).json({ id: result.lastInsertRowid });
   });
 
   // ---------- Qo'ng'iroq jadvali ----------
@@ -550,9 +668,11 @@ export function adminRoutes(db) {
     const rows = effectiveLessons(db, { schoolId: req.user.school_id, date }).filter((l) => !classId || l.class_id === classId);
     const lessonOf = db.prepare(
       `SELECT l.id, l.mode, l.started_at, l.room_change_reason, l.teacher_id, u.full_name AS teacher_name, r.name AS room_name,
-              a.expected_count, a.teacher_count, a.camera_count, a.is_suspicious
+              a.expected_count, a.teacher_count, a.is_suspicious,
+              cs.status AS camera_status, cs.camera_count, cs.error AS camera_error
        FROM lessons l JOIN users u ON u.id = l.teacher_id JOIN rooms r ON r.id = l.room_id
        LEFT JOIN attendance a ON a.lesson_id = l.id
+       LEFT JOIN counting_sessions cs ON cs.lesson_id = l.id
        WHERE l.timetable_id = ? AND l.date = ?`
     );
     const absentOf = db.prepare(
