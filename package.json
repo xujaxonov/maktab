@@ -1,0 +1,20 @@
+{
+  "name": "smartdavomat",
+  "version": "0.1.0",
+  "description": "SmartDavomat - maktab davomati tizimi (1-bosqich: MVP, kamerasiz)",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "create-school": "node src/cli/create-school.js",
+    "demo": "node src/cli/demo-data.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "express": "^5.2.1"
+  }
+}

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SmartDavomat — kirish</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="center-page">
+    <div class="login-box">
+      <form id="login-form" class="card hidden" novalidate>
+        <div class="brand">SmartDavomat</div>
+        <p class="muted small">Maktab davomati tizimi</p>
+        <div class="field">
+          <label for="login">Login</label>
+          <input id="login" name="login" autocomplete="username" autocapitalize="none" required>
+        </div>
+        <div class="field">
+          <label for="password">Parol</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+        </div>
+        <p id="login-error" class="notice notice-bad hidden"></p>
+        <button class="btn-primary btn-big" type="submit">Kirish</button>
+      </form>
+
+      <form id="change-form" class="card hidden" novalidate>
+        <div class="brand">Parolni almashtiring</div>
+        <p class="muted small">Birinchi kirishda admin bergan vaqtinchalik parolni o'zingizning parolingizga almashtiring.</p>
+        <div class="field">
+          <label for="old-password">Joriy (vaqtinchalik) parol</label>
+          <input id="old-password" type="password" autocomplete="current-password" required>
+        </div>
+        <div class="field">
+          <label for="new-password">Yangi parol</label>
+          <input id="new-password" type="password" autocomplete="new-password" required>
+          <p class="muted small">Kamida 8 belgi, harf va raqam bo'lsin.</p>
+        </div>
+        <div class="field">
+          <label for="new-password2">Yangi parolni takrorlang</label>
+          <input id="new-password2" type="password" autocomplete="new-password" required>
+        </div>
+        <p id="change-error" class="notice notice-bad hidden"></p>
+        <button class="btn-primary btn-big" type="submit">Saqlash</button>
+      </form>
+    </div>
+  </main>
+  <script type="module" src="/login.js"></script>
+</body>
+</html>
